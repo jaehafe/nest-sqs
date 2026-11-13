@@ -47,7 +47,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:compat": "vitest run --config vitest.compat.config.ts"
+    "test:compat": "vitest run --config vitest.compat.config.ts",
+    "smoke:aws": "node scripts/aws-smoke.mjs"
   },
   "devDependencies": {
     "@arethetypeswrong/core": "^0.18.5",
