@@ -48,9 +48,9 @@ async function count(queueUrl) {
   );
 }
 
-async function waitFor(check, timeoutMs, what) {
+async function waitFor(condition, timeoutMs, what) {
   const start = Date.now();
-  while (!(await check())) {
+  while (!(await condition())) {
     if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
@@ -182,7 +182,8 @@ try {
         new DeleteMessageCommand({ QueueUrl: standard, ReceiptHandle: `${receipt}tampered` }),
       );
     } catch (error) {
-      if (error.name !== 'ReceiptHandleIsInvalid') throw new Error(`got ${error.name}`);
+      if (error.name !== 'ReceiptHandleIsInvalid')
+        throw new Error(`got ${error.name}`, { cause: error });
       return error.name;
     }
     throw new Error('no error for a tampered receipt handle');
@@ -195,7 +196,7 @@ try {
       await sqs.send(new ReceiveMessageCommand({ QueueUrl: missing, WaitTimeSeconds: 0 }));
     } catch (error) {
       const known = ['QueueDoesNotExist', 'AWS.SimpleQueueService.NonExistentQueue'];
-      if (!known.includes(error.name)) throw new Error(`got ${error.name}`);
+      if (!known.includes(error.name)) throw new Error(`got ${error.name}`, { cause: error });
       return error.name;
     }
     throw new Error('no error for a missing queue');
