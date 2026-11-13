@@ -1,7 +1,7 @@
 # Design
 
 nest-sqs is a NestJS 11/12 replacement for `@ssut/nestjs-sqs`. This document records what it keeps,
-what it changes, and why. Everything here is implemented in 0.1 unless marked planned.
+what it changes, and why. Everything here is implemented unless marked planned.
 
 ## Goals
 
@@ -75,6 +75,10 @@ With `concurrency` above 1, messages of one `MessageGroupId` still run one at a 
 different groups run in parallel. Spring Cloud AWS does this in `FifoSqsComponentFactory` with
 `MessageGroupingSinkAdapter` and `OrderedMessageSink`.
 
+When a message fails, later messages of its group in the same batch are skipped and made visible
+again at once. SQS holds back a group while any of its messages is in flight, so leaving them
+invisible would also delay the failed message's retry; SQS redelivers the group in order.
+
 ### Handler lookup
 
 Handlers are found with Nest's `DiscoveryService` and `MetadataScanner`. `@golevelup/nestjs-discovery`
@@ -105,7 +109,8 @@ at hundreds of requests per second.
 ### Long handlers
 
 - `heartbeatInterval` extends visibility while a handler runs, so a slow message is not delivered to
-  a second worker. Shoryuken's `auto_extend_visibility` does the same.
+  a second worker. Shoryuken's `auto_extend_visibility` does the same. It stops at SQS's limit of
+  12 hours from receipt (Spring Cloud AWS `Visibility.MAX_VISIBILITY_TIMEOUT_SECONDS`).
 - `handleMessageTimeout` gives up on a handler that never settles and leaves its message for
   redelivery, so a lost promise cannot hold a slot forever (ssut/nestjs-sqs#42). The handler receives
   an `AbortSignal` so it can stop work it no longer owns.
@@ -124,6 +129,28 @@ clients usually close:
 
 `sqs-consumer`'s `stop()` stops polling but does not wait for running handlers, so a plain
 `app.close()` closes the database under them (ssut/nestjs-sqs#66).
+
+### Deleting
+
+A failed delete after a successful handler means the message runs again. Failed entries are retried
+up to 3 attempts, backing off from 200 ms with up to 25% jitter; errors that cannot succeed
+(`ReceiptHandleIsInvalid`, `AccessDenied` and similar) are reported at once. These are novu's
+`SqsConsumerService` values; the AWS SDK does not retry DNS errors such as `EAI_AGAIN` itself.
+
+A handler can delete its message early with `SqsService.deleteMessage` or move its retry with
+`changeMessageVisibility` (ssut/nestjs-sqs#63, #45). An early delete is remembered, so the automatic
+delete skips that message.
+
+### Middleware and context
+
+`middleware` runs around each handler call, module-wide entries outside consumer entries, in the
+shape of Shoryuken server middleware. Each call also runs in an `AsyncLocalStorage` context that
+`getSqsContext()` returns across awaits, so logs can carry the message id (ssut/nestjs-sqs#75).
+
+`nest-sqs/opentelemetry` builds on this: a CONSUMER span per call with the messaging semantic
+convention attributes, `messaging.process.duration` and `messaging.client.consumed.messages`, and
+trace context read from the `traceparent` message attribute. `@opentelemetry/api` is an optional
+peer.
 
 ### Producer
 
@@ -150,30 +177,38 @@ like `sqs-producer`'s `FailedMessagesError`, throws with the ids of entries SQS 
 | #86       | Limit concurrent processing                  | `concurrency`                                                                              |
 | #80       | Providers missing in `registerAsync`         | `extraProviders`                                                                           |
 | #66       | Stopping consumers cleanly                   | Drain on shutdown                                                                          |
-| #63, #45  | Delete a message manually                    | Planned: `SqsService.deleteMessage`                                                        |
+| #63, #45  | Delete a message manually                    | `SqsService.deleteMessage`, `changeMessageVisibility`                                      |
 | #42       | Handler never settles                        | `handleMessageTimeout` with `AbortSignal`                                                  |
-| #75       | Correlation id in logs                       | Planned: run each handler in its own async context                                         |
+| #75       | Correlation id in logs                       | `getSqsContext()` and middleware                                                           |
 | #97       | FIFO warning                                 | Ordered per message group                                                                  |
 | #101      | AWS SDK version mismatch                     | `sqs-consumer` ships its own `@aws-sdk/client-sqs` as a dependency; here it is only a peer |
 
 ## Verification
 
-| Layer         | What                                                                                                    | Where                                  |
-| ------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| Unit          | Polling loop, acknowledgement, concurrency, back-off, shutdown, FIFO, timeouts, producer, module wiring | `test/*.test.ts`, in-memory SQS client |
-| Integration   | Redelivery, no loss when stopping under load, long poll abort, heartbeat, FIFO order                    | `test/integration`, ElasticMQ          |
-| Compatibility | The e2e suite of `@ssut/nestjs-sqs`, unchanged except imports, on NestJS 11 and 12                      | `test/compat`, ElasticMQ               |
+| Layer         | What                                                                                                                                               | Where                                  |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| Unit          | Polling loop, acknowledgement, concurrency, back-off, shutdown, FIFO, timeouts, delete retries, middleware, OpenTelemetry, producer, module wiring | `test/*.test.ts`, in-memory SQS client |
+| Integration   | Redelivery, no loss when stopping under load, long poll abort, heartbeat, FIFO order, trace propagation                                            | `test/integration`, ElasticMQ          |
+| Compatibility | The e2e suite of `@ssut/nestjs-sqs`, unchanged except imports, on NestJS 11 and 12                                                                 | `test/compat`, ElasticMQ               |
+| Benchmark     | Against `@ssut/nestjs-sqs` in the same NestJS 11 app                                                                                               | `bench/`, ElasticMQ                    |
+| Smoke         | Throughput, redelivery, heartbeat, FIFO order, and the SQS error names the code relies on                                                          | `scripts/aws-smoke.mjs`, real SQS      |
 
 Each behavior test was checked by putting back the defect it guards against and seeing it fail.
 
-Not yet verified: real AWS SQS (ElasticMQ can differ on error codes and limits), throughput against
-`@ssut/nestjs-sqs`, and production use.
+## Known limitations
+
+- **A stopped consumer can delay one message.** Stopping aborts the outstanding long poll on the
+  client, but SQS keeps the request open until `waitTimeSeconds` and can hand it a message that then
+  stays invisible for one visibility timeout. The message is redelivered, not lost.
+  `sqs-consumer`'s abort has the same effect. Seen in the smoke test against ElasticMQ.
+- **Small receives when slots free one at a time.** Faster than a batch barrier in the benchmark,
+  but each call costs more against real SQS than against ElasticMQ.
 
 ## Roadmap
 
-| Version | Scope                                                                                                               |
-| ------- | ------------------------------------------------------------------------------------------------------------------- |
-| 0.1     | Module, discovery, polling loop, acknowledgement, FIFO groups, heartbeat, handler timeout, shutdown drain, producer |
-| 0.2     | `SqsService.deleteMessage` (#63, #45), per-handler async context (#75), OpenTelemetry spans and metrics             |
-| 0.3     | Smoke test on real AWS SQS, benchmark against `@ssut/nestjs-sqs`                                                    |
-| 1.0     | Migration guide, production use                                                                                     |
+| Version | Scope                                                                                                                                                                    |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 0.1     | Module, discovery, polling loop, acknowledgement, FIFO groups, heartbeat, handler timeout, shutdown drain, producer                                                      |
+| 0.2     | Delete retries, 12-hour heartbeat limit, FIFO hand-back, `deleteMessage` and `changeMessageVisibility` (#63, #45), middleware and `getSqsContext()` (#75), OpenTelemetry |
+| 0.3     | Benchmark against `@ssut/nestjs-sqs`, smoke test on real AWS SQS                                                                                                         |
+| 1.0     | Migration guide, production use                                                                                                                                          |
