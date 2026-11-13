@@ -100,6 +100,10 @@ const MAX_VISIBILITY_SECONDS = 43_200;
 const DELETE_MAX_ATTEMPTS = 3;
 const DELETE_BACKOFF_BASE_MS = 200;
 const DELETE_BACKOFF_JITTER_FACTOR = 0.25;
+// The text SQS returns with ReceiptHandleIsInvalid when the message is already gone (AWS .NET
+// SQSMessagePoller compares the same text, case-insensitively).
+const MESSAGE_DELETED_DURING_VISIBILITY_CHANGE =
+  'message does not exist or is not available for visibility timeout change';
 const NON_RETRYABLE_DELETE_ERRORS = new Set([
   'ReceiptHandleIsInvalid',
   'InvalidParameterValue',
@@ -553,10 +557,13 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     }
   }
 
+  // Reports entries SQS failed to change, like the AWS .NET poller (SQSMessagePoller,
+  // ChangeMessageVisibilityBatch handling). A message deleted while its visibility was being changed
+  // is not an error, and is skipped by the same code and text check .NET uses.
   private async changeVisibility(messages: Message[], timeout: number): Promise<void> {
     for (const chunk of chunks(messages, SQS_MAX_BATCH)) {
       try {
-        await this.sqs.send(
+        const output = await this.sqs.send(
           new ChangeMessageVisibilityBatchCommand({
             QueueUrl: this.queueUrl,
             Entries: chunk.map((message, index) => ({
@@ -566,6 +573,18 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
             })),
           }),
         );
+        for (const entry of output.Failed ?? []) {
+          const deletedMeanwhile =
+            entry.Code === 'ReceiptHandleIsInvalid' &&
+            entry.Message?.toLowerCase() === MESSAGE_DELETED_DURING_VISIBILITY_CHANGE;
+          if (deletedMeanwhile) continue;
+          const message = chunk[Number(entry.Id)];
+          const error = new Error(
+            `Failed to change visibility of message ${message?.MessageId}: ${entry.Code ?? 'unknown'} ${entry.Message ?? ''}`.trim(),
+          );
+          error.name = entry.Code ?? 'ChangeVisibilityFailed';
+          this.safeEmit('error', error, message);
+        }
       } catch (error) {
         this.safeEmit('error', toError(error), chunk);
       }

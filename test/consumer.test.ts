@@ -555,3 +555,47 @@ describe('receive size', () => {
     expect(Math.max(...sizes)).toBe(2);
   });
 });
+
+describe('visibility change failures', () => {
+  test('reports entries SQS failed to change', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('m');
+    sqs.visibilityFailures.push({ Code: 'InternalError', SenderFault: false });
+    const errors: Error[] = [];
+    const consumer = createConsumer(sqs, {
+      terminateVisibilityTimeout: true,
+      handleMessage: async () => {
+        throw new Error('boom');
+      },
+    });
+    consumer.on('error', (error) => errors.push(error));
+    consumer.start();
+
+    await waitFor(() => errors.length === 1);
+    expect(errors[0]!.name).toBe('InternalError');
+  });
+
+  // The message was deleted in the meantime: nothing is wrong (AWS .NET SQSMessagePoller does the same).
+  test('ignores a message deleted during the change', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('m');
+    sqs.visibilityFailures.push({
+      Code: 'ReceiptHandleIsInvalid',
+      SenderFault: true,
+      Message: 'Message does not exist or is not available for visibility timeout change',
+    });
+    const errors: Error[] = [];
+    const consumer = createConsumer(sqs, {
+      terminateVisibilityTimeout: true,
+      handleMessage: async () => {
+        throw new Error('boom');
+      },
+    });
+    consumer.on('error', (error) => errors.push(error));
+    consumer.start();
+
+    await waitFor(() => sqs.callsOf('ChangeMessageVisibilityBatchCommand').length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(errors).toEqual([]);
+  });
+});

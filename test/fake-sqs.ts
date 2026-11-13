@@ -24,6 +24,8 @@ export class FakeSqs {
   receiveErrors: Error[] = [];
   /** Fail the next DeleteMessageBatch calls: an Error is thrown, an object marks every entry failed. */
   deleteFailures: Array<Error | { Code: string; SenderFault: boolean }> = [];
+  /** Mark every entry of the next ChangeMessageVisibilityBatch calls failed with this code. */
+  visibilityFailures: Array<{ Code: string; SenderFault: boolean; Message?: string }> = [];
   private readonly stored: StoredMessage[] = [];
   private receiptSeq = 0;
 
@@ -132,6 +134,13 @@ export class FakeSqs {
   }
 
   private changeVisibility(input: any) {
+    const failure = this.visibilityFailures.shift();
+    if (failure) {
+      return {
+        Successful: [],
+        Failed: input.Entries.map((entry: any) => ({ Id: entry.Id, ...failure })),
+      };
+    }
     for (const entry of input.Entries) {
       const stored = this.stored.find((item) => item.receipt === entry.ReceiptHandle);
       if (stored) stored.invisibleUntil = Date.now() + entry.VisibilityTimeout * 1000;
