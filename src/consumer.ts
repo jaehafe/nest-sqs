@@ -59,6 +59,9 @@ const CONNECTION_ERRORS = new Set([
 const DEFAULT_BACKOFF = { initialMs: 1_000, multiplier: 2, maxMs: 10_000 };
 const DEFAULT_DRAIN_TIMEOUT_MS = 15_000;
 const SQS_MAX_BATCH = 10;
+// SQS caps a message's total visibility at 12 hours from receipt (Spring Cloud AWS
+// Visibility.MAX_VISIBILITY_TIMEOUT_SECONDS).
+const MAX_VISIBILITY_SECONDS = 43_200;
 
 /**
  * Polls one queue and runs a handler per message (or per batch) with at most `concurrency`
@@ -358,12 +361,19 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     }
   }
 
+  // Each tick sets visibility to `visibilityTimeout` from now, but never past 12 hours from receipt:
+  // SQS rejects that. The last tick sets what is left and stops.
   private startHeartbeat(messages: Message[]): NodeJS.Timeout | undefined {
     const { heartbeatInterval, visibilityTimeout } = this.config;
     if (!heartbeatInterval || visibilityTimeout === undefined) return undefined;
-    return setInterval(() => {
-      void this.changeVisibility(messages, visibilityTimeout);
+    const receivedAt = Date.now();
+    const timer: NodeJS.Timeout = setInterval(() => {
+      const elapsedSeconds = Math.floor((Date.now() - receivedAt) / 1000);
+      const left = MAX_VISIBILITY_SECONDS - elapsedSeconds;
+      if (left <= visibilityTimeout) clearInterval(timer);
+      if (left > 0) void this.changeVisibility(messages, Math.min(visibilityTimeout, left));
     }, heartbeatInterval * 1000);
+    return timer;
   }
 
   private async terminateVisibility(messages: Message[]): Promise<void> {

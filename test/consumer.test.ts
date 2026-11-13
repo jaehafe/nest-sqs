@@ -1,5 +1,5 @@
 import type { Message } from '@aws-sdk/client-sqs';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { SqsConsumer } from '../src/consumer.ts';
 import type { SqsConsumerConfig } from '../src/consumer.ts';
 import { FakeSqs, deferred, waitFor } from './fake-sqs.ts';
@@ -338,5 +338,36 @@ describe('options', () => {
     expect(() =>
       createConsumer(new FakeSqs(), { handleMessage: async () => {}, ...options }),
     ).toThrow(message);
+  });
+});
+
+describe('heartbeat', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test('never extends visibility past 12 hours from receipt', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    const sqs = new FakeSqs();
+    sqs.add('very long');
+    const consumer = createConsumer(sqs, {
+      visibilityTimeout: 30,
+      heartbeatInterval: 10,
+      handleMessage: () => new Promise(() => {}),
+    });
+    consumer.start();
+    await waitFor(() => consumer.inFlightCount === 1);
+
+    vi.advanceTimersByTime(10_000);
+    // 10 s + jump + 10 s = 43,185 s since receipt, so 15 s are left at the next tick.
+    vi.setSystemTime(Date.now() + 43_165_000);
+    vi.advanceTimersByTime(10_000);
+    vi.advanceTimersByTime(10_000);
+
+    const timeouts = sqs
+      .callsOf('ChangeMessageVisibilityBatchCommand')
+      .map((call) => call.input.Entries[0].VisibilityTimeout);
+    // A normal tick, then the last 15 s that are left, then nothing.
+    expect(timeouts).toEqual([30, 15]);
   });
 });
