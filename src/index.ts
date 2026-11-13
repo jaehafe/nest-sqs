@@ -21,3 +21,5 @@ export type {
   SqsConsumerConfig,
   SqsConsumerEvents,
 } from './consumer.ts';
+export { FailedMessagesError, SqsProducer } from './producer.ts';
+export type { ProducerMessage } from './producer.ts';
