@@ -132,8 +132,11 @@ are the same. Differences:
 - A failing batch handler emits `processing_error` with the messages, not `error`.
 - On FIFO queues, messages of one group run in order; `sqs-consumer` ran a batch in parallel.
 - Two `@SqsMessageHandler`s for one consumer fail the boot instead of one being picked.
-- New options: `concurrency`, `pollingErrorBackoff`, `drainTimeoutMs`, `middleware`, and
-  `extraProviders` on `registerAsync`.
+- `handleMessageTimeout` aborts the handler's signal but keeps its slot until it settles, instead
+  of treating the message as failed while the handler still runs.
+- With `concurrency` and no `batchSize`, a receive asks for up to `concurrency` messages (at most 10) instead of 1.
+- New options: `concurrency`, `pollingErrorBackoff`, `drainTimeoutMs`, `abortGraceMs`,
+  `middleware`, and `extraProviders` on `registerAsync`.
 
 ## License
 

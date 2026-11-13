@@ -108,12 +108,16 @@ at hundreds of requests per second.
 
 ### Long handlers
 
-- `heartbeatInterval` extends visibility while a handler runs, so a slow message is not delivered to
-  a second worker. Shoryuken's `auto_extend_visibility` does the same. It stops at SQS's limit of
-  12 hours from receipt (Spring Cloud AWS `Visibility.MAX_VISIBILITY_TIMEOUT_SECONDS`).
-- `handleMessageTimeout` gives up on a handler that never settles and leaves its message for
-  redelivery, so a lost promise cannot hold a slot forever (ssut/nestjs-sqs#42). The handler receives
-  an `AbortSignal` so it can stop work it no longer owns.
+- `heartbeatInterval` extends visibility from the moment a message is received until its handler
+  settles, so a slow message is not delivered to a second worker. That includes FIFO messages
+  waiting behind an earlier message of their group. Shoryuken's `auto_extend_visibility` does the
+  same. It stops at SQS's limit of 12 hours from receipt (Spring Cloud AWS
+  `Visibility.MAX_VISIBILITY_TIMEOUT_SECONDS`).
+- `handleMessageTimeout` aborts the handler's `AbortSignal` and emits `timeout_error`
+  (ssut/nestjs-sqs#42), but keeps its slot and its heartbeat until the handler settles. Freeing the
+  slot earlier ran more handlers than `concurrency`, and making the message visible again ran it
+  twice. A late success still deletes the message. A handler that ignores its signal forever holds
+  one slot.
 
 ### Shutdown
 
@@ -123,9 +127,12 @@ clients usually close:
 
 1. stop polling,
 2. wait up to `drainTimeoutMs` (default 15 s) for in-flight handlers,
-3. abort the outstanding long poll, so a late response is not processed while the app tears down
+3. abort the signals of handlers still running and wait up to `abortGraceMs` (default 5 s) for them
+   to settle; with the defaults this ends 20 s after `SIGTERM`, inside the 30 s Kubernetes and ECS
+   allow,
+4. abort the outstanding long poll, so a late response is not processed while the app tears down
    its connections,
-4. log any messages still in flight; they will be redelivered.
+5. log any handlers that never settled; their messages will be redelivered.
 
 `sqs-consumer`'s `stop()` stops polling but does not wait for running handlers, so a plain
 `app.close()` closes the database under them (ssut/nestjs-sqs#66).
@@ -194,6 +201,11 @@ like `sqs-producer`'s `FailedMessagesError`, throws with the ids of entries SQS 
 | Smoke         | Throughput, redelivery, heartbeat, FIFO order, and the SQS error names the code relies on                                                          | `scripts/aws-smoke.mjs`, real SQS      |
 
 Each behavior test was checked by putting back the defect it guards against and seeing it fail.
+
+## Reviews
+
+[reference-review.md](reference-review.md) compares this design with Broadway, the Go CDK, the AWS
+.NET framework and Java SDK batching, Spring Cloud AWS and kombu, and tracks what was fixed.
 
 ## Known limitations
 
