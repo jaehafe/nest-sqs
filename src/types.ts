@@ -89,10 +89,16 @@ export interface SqsConsumerOptions {
   /** Delay between polls after a failed `ReceiveMessage`. `false` retries immediately. */
   pollingErrorBackoff?: PollingErrorBackoff | false;
   /**
-   * Milliseconds to wait for in-flight handlers on shutdown before giving up on them.
+   * Milliseconds to wait for in-flight handlers on shutdown before aborting their signals.
    * @default 15000
    */
   drainTimeoutMs?: number;
+  /**
+   * Milliseconds handlers still running after the drain get to react to their aborted signal before
+   * `stop()` returns anyway.
+   * @default 5000
+   */
+  abortGraceMs?: number;
 }
 
 /** Field names follow `sqs-producer`, which `@ssut/nestjs-sqs` passed through. */

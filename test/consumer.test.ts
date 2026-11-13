@@ -11,6 +11,8 @@ function createConsumer(sqs: FakeSqs, config: Partial<SqsConsumerConfig>) {
   const consumer = new SqsConsumer({
     queueUrl: QUEUE,
     sqs: sqs.asClient(),
+    // Tests leave handlers hanging on purpose; do not wait 5 s for each when cleaning up.
+    abortGraceMs: 50,
     ...config,
   } as SqsConsumerConfig);
   consumers.push(consumer);
@@ -788,5 +790,73 @@ describe('batch handler partial success', () => {
     await waitFor(() => sqs.deleted.length === 1 && consumer.inFlightCount === 0);
     expect(sqs.deleted).toEqual(['b1']);
     expect(sqs.remaining).toEqual(['a1', 'a2']);
+  });
+});
+
+describe('shutdown after the drain times out', () => {
+  test('waits for handlers to finish reacting to the aborted signal', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('cleans up');
+    const events: string[] = [];
+    const consumer = createConsumer(sqs, {
+      drainTimeoutMs: 20,
+      abortGraceMs: 1_000,
+      handleMessage: (_message, signal) =>
+        new Promise((resolve) => {
+          signal.addEventListener('abort', () => {
+            // Some cleanup that takes a while after the abort.
+            setTimeout(() => {
+              events.push('handler done');
+              resolve(undefined);
+            }, 50);
+          });
+        }),
+    });
+    consumer.start();
+    await waitFor(() => consumer.inFlightCount === 1);
+
+    await consumer.stop();
+    events.push('stop resolved');
+    expect(events).toEqual(['handler done', 'stop resolved']);
+  });
+
+  test('gives up after `abortGraceMs` on a handler that ignores the signal', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('stuck');
+    const consumer = createConsumer(sqs, {
+      drainTimeoutMs: 20,
+      abortGraceMs: 30,
+      handleMessage: () => new Promise(() => {}),
+    });
+    consumer.start();
+    await waitFor(() => consumer.inFlightCount === 1);
+
+    const started = Date.now();
+    await consumer.stop();
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(consumer.inFlightCount).toBe(1);
+  });
+
+  test('`abort: true` also waits for handlers to react', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('m');
+    let finished = false;
+    const consumer = createConsumer(sqs, {
+      abortGraceMs: 1_000,
+      handleMessage: (_message, signal) =>
+        new Promise((resolve) => {
+          signal.addEventListener('abort', () => {
+            setTimeout(() => {
+              finished = true;
+              resolve(undefined);
+            }, 30);
+          });
+        }),
+    });
+    consumer.start();
+    await waitFor(() => consumer.inFlightCount === 1);
+
+    await consumer.stop({ abort: true });
+    expect(finished).toBe(true);
   });
 });

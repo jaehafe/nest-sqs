@@ -92,6 +92,10 @@ const CONNECTION_ERRORS = new Set([
 // Spring Cloud AWS default poll back-off (AbstractContainerOptions: 1000 ms, x2, 10000 ms).
 const DEFAULT_BACKOFF = { initialMs: 1_000, multiplier: 2, maxMs: 10_000 };
 const DEFAULT_DRAIN_TIMEOUT_MS = 15_000;
+// After the drain times out, how long handlers get to react to their aborted signal. With the
+// default drain this ends 20 s after SIGTERM, inside the 30 s Kubernetes and ECS give by default,
+// leaving the app time to close.
+const DEFAULT_ABORT_GRACE_MS = 5_000;
 const SQS_MAX_BATCH = 10;
 // SQS caps a message's total visibility at 12 hours from receipt (Spring Cloud AWS
 // Visibility.MAX_VISIBILITY_TIMEOUT_SECONDS).
@@ -128,6 +132,7 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
   private readonly concurrency: number;
   private readonly waitTimeSeconds: number;
   private readonly drainTimeoutMs: number;
+  private readonly abortGraceMs: number;
   private readonly backoff: Required<NonNullable<SqsConsumerOptions['pollingErrorBackoff']>> | null;
 
   private running = false;
@@ -156,6 +161,7 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     this.concurrency = config.concurrency ?? (config.handleMessageBatch ? 1 : this.batchSize);
     this.waitTimeSeconds = config.waitTimeSeconds ?? 20;
     this.drainTimeoutMs = config.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
+    this.abortGraceMs = config.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS;
     this.backoff =
       config.pollingErrorBackoff === false
         ? null
@@ -187,18 +193,22 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
   }
 
   /**
-   * Stops polling, waits up to `drainTimeoutMs` for in-flight handlers, then aborts the outstanding
-   * long poll. With `abort: true` it does not wait: handlers get an aborted signal right away.
+   * Stops polling and waits up to `drainTimeoutMs` for in-flight handlers. Handlers still running
+   * then get an aborted signal and up to `abortGraceMs` more to settle, so their cleanup and deletes
+   * finish before the app closes its connections. With `abort: true` the signal is aborted at once
+   * and only the grace applies. The outstanding long poll is aborted last.
+   *
+   * Resolves even if some handlers never settle; `inFlightCount` then says how many.
    */
   async stop(options: StopOptions = {}): Promise<void> {
     if (!this.running) return;
     this.running = false;
     this.releaseSlotWaiters();
 
-    if (options.abort) {
+    const drained = options.abort ? false : await this.waitForInFlight(this.drainTimeoutMs);
+    if (!drained) {
       this.handlerController.abort();
-    } else {
-      await this.drain();
+      await this.waitForInFlight(this.abortGraceMs);
     }
     this.receiveController.abort();
     if (options.abort) this.safeEmit('aborted');
@@ -206,20 +216,19 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     this.safeEmit('stopped');
   }
 
-  private async drain(): Promise<void> {
-    if (this.inFlight.size === 0) return;
+  // Resolves `true` once no handler is in flight, or `false` after `ms`.
+  private async waitForInFlight(ms: number): Promise<boolean> {
+    if (this.inFlight.size === 0) return true;
     let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<'timeout'>((resolve) => {
-      timer = setTimeout(() => resolve('timeout'), this.drainTimeoutMs);
+    const timeout = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
     });
     const result = await Promise.race([
-      Promise.allSettled(this.inFlight).then(() => 'drained' as const),
+      Promise.allSettled(this.inFlight).then(() => true as const),
       timeout,
     ]);
     clearTimeout(timer);
-    if (result === 'timeout') {
-      this.handlerController.abort();
-    }
+    return result;
   }
 
   /**
