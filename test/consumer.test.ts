@@ -599,3 +599,27 @@ describe('visibility change failures', () => {
     expect(errors).toEqual([]);
   });
 });
+
+describe('deleted by the handler, then failed', () => {
+  test('forgets the message and does not change visibility of a deleted message', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('m');
+    const errors: Error[] = [];
+    let consumer!: SqsConsumer;
+    consumer = createConsumer(sqs, {
+      terminateVisibilityTimeout: true,
+      handleMessage: async (message) => {
+        await consumer.deleteMessage(message);
+        throw new Error('after delete');
+      },
+    });
+    consumer.on('processing_error', (error) => errors.push(error));
+    consumer.start();
+
+    await waitFor(() => errors.length === 1 && consumer.inFlightCount === 0);
+    expect(sqs.callsOf('ChangeMessageVisibilityBatchCommand')).toHaveLength(0);
+    expect((consumer as unknown as { deletedByHandler: Set<string> }).deletedByHandler.size).toBe(
+      0,
+    );
+  });
+});

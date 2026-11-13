@@ -374,10 +374,11 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
       const err = toError(error);
       if (err instanceof HandlerTimeoutError) this.safeEmit('timeout_error', err, message);
       else this.safeEmit('processing_error', err, message);
+      const notDeleted = this.forgetDeletedByHandler([message]);
       if (this.config.alwaysAcknowledge) {
-        await this.acknowledge([message]);
+        await this.acknowledge(notDeleted);
       } else {
-        await this.terminateVisibility([message]);
+        await this.terminateVisibility(notDeleted);
       }
       return false;
     } finally {
@@ -398,8 +399,9 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
       );
     } catch (error) {
       this.safeEmit('processing_error', toError(error), messages);
-      if (this.config.alwaysAcknowledge) await this.acknowledge(messages);
-      else await this.terminateVisibility(messages);
+      const notDeleted = this.forgetDeletedByHandler(messages);
+      if (this.config.alwaysAcknowledge) await this.acknowledge(notDeleted);
+      else await this.terminateVisibility(notDeleted);
       return;
     } finally {
       clearInterval(heartbeat);
@@ -480,7 +482,16 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     return timer;
   }
 
+  // Drops the messages a handler deleted itself from the set and returns the others. Runs on every
+  // way out of a handler, so the set cannot grow.
+  private forgetDeletedByHandler(messages: Message[]): Message[] {
+    return messages.filter(
+      (message) => !(message.ReceiptHandle && this.deletedByHandler.delete(message.ReceiptHandle)),
+    );
+  }
+
   private async terminateVisibility(messages: Message[]): Promise<void> {
+    if (messages.length === 0) return;
     const option = this.config.terminateVisibilityTimeout;
     if (option === undefined || option === false) return;
     const timeout = typeof option === 'function' ? option(messages) : option === true ? 0 : option;
