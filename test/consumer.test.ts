@@ -748,3 +748,45 @@ describe('heartbeat from receipt', () => {
     expect(timeouts.at(-1)).toBe(0);
   });
 });
+
+describe('batch handler partial success', () => {
+  test('reports and hands back the messages it did not return', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('a');
+    sqs.add('b');
+    sqs.add('c');
+    const failed: Message[][] = [];
+    const consumer = createConsumer(sqs, {
+      batchSize: 3,
+      terminateVisibilityTimeout: true,
+      handleMessageBatch: async (messages) => messages.filter((message) => message.Body !== 'b'),
+    });
+    consumer.on('processing_error', (_error, messages) => failed.push(messages as Message[]));
+    consumer.start();
+
+    await waitFor(() => failed.length === 1 && sqs.deleted.length === 2);
+    expect(failed[0]!.map((message) => message.Body)).toEqual(['b']);
+    const released = sqs.callsOf('ChangeMessageVisibilityBatchCommand')[0]!.input.Entries;
+    expect(released).toEqual([
+      expect.objectContaining({ ReceiptHandle: sqs.receiptOf('b'), VisibilityTimeout: 0 }),
+    ]);
+  });
+
+  test('on a FIFO queue, does not delete a later message of a group whose earlier one failed', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('a1', { MessageGroupId: 'a' });
+    sqs.add('a2', { MessageGroupId: 'a' });
+    sqs.add('b1', { MessageGroupId: 'b' });
+    const consumer = createConsumer(sqs, {
+      queueUrl: `${QUEUE}.fifo`,
+      batchSize: 3,
+      handleMessageBatch: async (messages) => messages.filter((message) => message.Body !== 'a1'),
+    });
+    consumer.on('processing_error', () => {});
+    consumer.start();
+
+    await waitFor(() => sqs.deleted.length === 1 && consumer.inFlightCount === 0);
+    expect(sqs.deleted).toEqual(['b1']);
+    expect(sqs.remaining).toEqual(['a1', 'a2']);
+  });
+});

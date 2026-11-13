@@ -430,12 +430,43 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
       else await this.terminateVisibility(notDeleted);
       return;
     }
-    if (Array.isArray(result) && !this.config.alwaysAcknowledge) {
-      const ids = new Set(result.map((message: Message) => message.MessageId));
-      await this.acknowledge(messages.filter((message) => ids.has(message.MessageId)));
-    } else {
+    if (!Array.isArray(result) || this.config.alwaysAcknowledge) {
       await this.acknowledge(messages);
+      return;
     }
+    await this.settlePartialBatch(messages, result as Message[]);
+  }
+
+  // A batch handler returned only some messages. The rest failed: report them and give them the
+  // usual failure handling, as Broadway sends a batch's failed messages to `handle_failed`
+  // (batch_processor_stage.ex). On a FIFO queue a returned message that comes after a failed one of
+  // its group is not deleted either but handed back, so the group is redelivered in order.
+  private async settlePartialBatch(messages: Message[], returned: Message[]): Promise<void> {
+    const ids = new Set(returned.map((message) => message.MessageId));
+    const failed = messages.filter((message) => !ids.has(message.MessageId));
+    const blockedGroups = new Set<string>();
+    const ack: Message[] = [];
+    const handBack: Message[] = [];
+    for (const message of messages) {
+      const groupId = message.Attributes?.MessageGroupId ?? '';
+      if (!ids.has(message.MessageId)) {
+        if (this.isFifo) blockedGroups.add(groupId);
+      } else if (this.isFifo && blockedGroups.has(groupId)) {
+        handBack.push(message);
+      } else {
+        ack.push(message);
+      }
+    }
+    if (failed.length > 0) {
+      this.safeEmit(
+        'processing_error',
+        new Error(`Batch handler did not return ${failed.length} of ${messages.length} messages`),
+        failed,
+      );
+    }
+    await this.acknowledge(ack);
+    await this.terminateVisibility(this.forgetDeletedByHandler(failed));
+    await this.changeVisibility(this.forgetDeletedByHandler(handBack), 0);
   }
 
   // Runs the middleware chain and the handler inside the handler's async context.
@@ -592,6 +623,7 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
   // ChangeMessageVisibilityBatch handling). A message deleted while its visibility was being changed
   // is not an error, and is skipped by the same code and text check .NET uses.
   private async changeVisibility(messages: Message[], timeout: number): Promise<void> {
+    if (messages.length === 0) return;
     for (const chunk of chunks(messages, SQS_MAX_BATCH)) {
       try {
         const output = await this.sqs.send(
