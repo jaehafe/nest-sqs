@@ -42,7 +42,10 @@ export interface SqsConsumerOptions {
   attributeNames?: QueueAttributeName[];
   messageAttributeNames?: string[];
   messageSystemAttributeNames?: MessageSystemAttributeName[];
-  /** Messages per `ReceiveMessage` call, 1 to 10. @default 1 */
+  /**
+   * Most messages per `ReceiveMessage` call, 1 to 10.
+   * @default `concurrency` capped at 10, or 1 for a batch handler
+   */
   batchSize?: number;
   /** Seconds. Defaults to the queue's own setting. */
   visibilityTimeout?: number;

@@ -516,3 +516,42 @@ describe('middleware and context', () => {
     expect(sqs.deleted).toEqual([]);
   });
 });
+
+describe('receive size', () => {
+  test('asks for up to `concurrency` messages (at most 10) when `batchSize` is not set', async () => {
+    const sqs = new FakeSqs();
+    for (let i = 0; i < 30; i++) sqs.add(`m${i}`);
+    const consumer = createConsumer(sqs, { concurrency: 50, handleMessage: async () => {} });
+    consumer.start();
+
+    await waitFor(() => sqs.deleted.length === 30);
+    expect(sqs.callsOf('ReceiveMessageCommand')[0]!.input.MaxNumberOfMessages).toBe(10);
+  });
+
+  test('keeps one message per receive when neither option is set, as sqs-consumer does', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('m');
+    const consumer = createConsumer(sqs, { handleMessage: async () => {} });
+    consumer.start();
+
+    await waitFor(() => sqs.deleted.length === 1);
+    expect(sqs.callsOf('ReceiveMessageCommand')[0]!.input.MaxNumberOfMessages).toBe(1);
+  });
+
+  test('an explicit `batchSize` still caps each receive', async () => {
+    const sqs = new FakeSqs();
+    for (let i = 0; i < 6; i++) sqs.add(`m${i}`);
+    const consumer = createConsumer(sqs, {
+      batchSize: 2,
+      concurrency: 50,
+      handleMessage: async () => {},
+    });
+    consumer.start();
+
+    await waitFor(() => sqs.deleted.length === 6);
+    const sizes = sqs
+      .callsOf('ReceiveMessageCommand')
+      .map((call) => call.input.MaxNumberOfMessages);
+    expect(Math.max(...sizes)).toBe(2);
+  });
+});

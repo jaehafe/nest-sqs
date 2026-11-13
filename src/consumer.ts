@@ -141,7 +141,13 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     this.config = config;
     this.queueUrl = config.queueUrl;
     this.isFifo = config.queueUrl.endsWith('.fifo');
-    this.batchSize = config.batchSize ?? 1;
+    // Without `batchSize`, ask for as many messages as there are slots (SQS allows 10), like the AWS
+    // .NET poller (SQSMessagePoller: min(free slots, 10)). Before, `concurrency: 50` alone still
+    // received one message per call. For a batch handler `concurrency` counts batches, so it keeps
+    // sqs-consumer's default of 1.
+    this.batchSize =
+      config.batchSize ??
+      (config.handleMessageBatch ? 1 : Math.min(config.concurrency ?? 1, SQS_MAX_BATCH));
     this.concurrency = config.concurrency ?? (config.handleMessageBatch ? 1 : this.batchSize);
     this.waitTimeSeconds = config.waitTimeSeconds ?? 20;
     this.drainTimeoutMs = config.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
