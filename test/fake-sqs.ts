@@ -82,8 +82,17 @@ export class FakeSqs {
     const visibleMs =
       input.VisibilityTimeout === undefined ? this.visibilityMs : input.VisibilityTimeout * 1000;
     const messages: Message[] = [];
+    // Like SQS FIFO: a group is held back while any of its messages is in flight, and a group's
+    // messages come out in order.
+    const blockedGroups = new Set<string>();
+    for (const entry of this.stored) {
+      const group = entry.message.Attributes?.MessageGroupId;
+      if (group !== undefined && entry.invisibleUntil > now) blockedGroups.add(group);
+    }
     for (const entry of this.stored) {
       if (messages.length >= input.MaxNumberOfMessages) break;
+      const group = entry.message.Attributes?.MessageGroupId;
+      if (group !== undefined && blockedGroups.has(group)) continue;
       if (entry.invisibleUntil > now) continue;
       entry.receipt = `r-${++this.receiptSeq}`;
       entry.invisibleUntil = now + visibleMs;

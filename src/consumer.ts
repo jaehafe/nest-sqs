@@ -246,15 +246,21 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
   }
 
   // Messages of one group run one after another in receive order; groups run in parallel. Once a
-  // message fails, later messages of its group are not run, so they cannot overtake it. They stay
-  // invisible until their visibility timeout ends and come back after the failed one.
+  // message fails, later messages of its group are not run, so they cannot overtake it. They are
+  // made visible again at once: SQS holds back a group while any of its messages is in flight, so
+  // leaving them invisible would also delay the retry of the failed one. SQS then redelivers the
+  // group in its original order.
   private dispatchFifo(messages: Message[]): Promise<void>[] {
     const lastOfGroup = new Map<string, Promise<boolean>>();
     return messages.map((message) => {
       const groupId = message.Attributes?.MessageGroupId ?? '';
       const previous = lastOfGroup.get(groupId);
       const result = previous
-        ? previous.then((ok) => (ok ? this.processMessage(message) : false))
+        ? previous.then(async (ok) => {
+            if (ok) return this.processMessage(message);
+            await this.changeVisibility([message], 0);
+            return false;
+          })
         : this.processMessage(message);
       lastOfGroup.set(groupId, result);
       return this.track(() => result);

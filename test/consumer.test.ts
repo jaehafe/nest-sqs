@@ -294,10 +294,13 @@ describe('FIFO queues', () => {
     });
     consumer.start();
 
-    await waitFor(() => seen.length === 1);
+    await waitFor(() => sqs.callsOf('ChangeMessageVisibilityBatchCommand').length === 1);
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(seen).toEqual(['a1']);
     expect(sqs.remaining).toEqual(['a1', 'a2']);
+    // a2 is handed back at once so it does not hold the group after a1's retry.
+    const released = sqs.callsOf('ChangeMessageVisibilityBatchCommand')[0]!.input.Entries;
+    expect(released).toEqual([expect.objectContaining({ VisibilityTimeout: 0 })]);
   });
 });
 
