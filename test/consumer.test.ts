@@ -1,6 +1,6 @@
 import type { Message } from '@aws-sdk/client-sqs';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { SqsConsumer } from '../src/consumer.ts';
+import { SqsConsumer, getSqsContext } from '../src/consumer.ts';
 import type { SqsConsumerConfig } from '../src/consumer.ts';
 import { FakeSqs, deferred, waitFor } from './fake-sqs.ts';
 
@@ -449,5 +449,70 @@ describe('manual acknowledgement', () => {
 
     await waitFor(() => sqs.callsOf('ChangeMessageVisibilityCommand').length === 1);
     expect(sqs.callsOf('ChangeMessageVisibilityCommand')[0]!.input.VisibilityTimeout).toBe(120);
+  });
+});
+
+describe('middleware and context', () => {
+  test('runs middleware outermost first and exposes the context across awaits', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('m');
+    const order: string[] = [];
+    let seenInHandler: string | undefined;
+    const consumer = createConsumer(sqs, {
+      name: 'orders',
+      middleware: [
+        async (context, next) => {
+          order.push(`outer before ${context.name}`);
+          await next();
+          order.push('outer after');
+        },
+        async (_context, next) => {
+          order.push('inner before');
+          await next();
+          order.push('inner after');
+        },
+      ],
+      handleMessage: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        seenInHandler = getSqsContext()?.messages[0]?.Body;
+        order.push('handler');
+      },
+    });
+    consumer.start();
+
+    await waitFor(() => sqs.deleted.length === 1);
+    expect(order).toEqual([
+      'outer before orders',
+      'inner before',
+      'handler',
+      'inner after',
+      'outer after',
+    ]);
+    expect(seenInHandler).toBe('m');
+    expect(getSqsContext()).toBeUndefined();
+  });
+
+  test('a middleware that throws fails the message', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('rejected');
+    const errors: Error[] = [];
+    let handled = false;
+    const consumer = createConsumer(sqs, {
+      middleware: [
+        async () => {
+          throw new Error('rejected by middleware');
+        },
+      ],
+      handleMessage: async () => {
+        handled = true;
+      },
+    });
+    consumer.on('processing_error', (error) => errors.push(error));
+    consumer.start();
+
+    await waitFor(() => errors.length === 1);
+    expect(errors[0]!.message).toBe('rejected by middleware');
+    expect(handled).toBe(false);
+    expect(sqs.deleted).toEqual([]);
   });
 });

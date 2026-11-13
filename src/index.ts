@@ -14,12 +14,14 @@ export type {
   SqsProducerOptions,
   StopOptions,
 } from './types.ts';
-export { HandlerTimeoutError, SqsConsumer } from './consumer.ts';
+export { HandlerTimeoutError, SqsConsumer, getSqsContext } from './consumer.ts';
 export type {
   BatchMessageHandler,
   MessageHandler,
   SqsConsumerConfig,
   SqsConsumerEvents,
+  SqsHandlerContext,
+  SqsMiddleware,
 } from './consumer.ts';
 export { FailedMessagesError, SqsProducer } from './producer.ts';
 export type { ProducerMessage } from './producer.ts';

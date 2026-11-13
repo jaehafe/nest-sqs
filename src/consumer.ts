@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { EventEmitter } from 'node:events';
 import {
   ChangeMessageVisibilityBatchCommand,
@@ -33,8 +34,39 @@ export interface SqsConsumerEvents {
   aborted: [];
 }
 
-export type SqsConsumerConfig = Omit<SqsConsumerOptions, 'name' | 'stopOptions'> &
-  (
+/** What a middleware and `getSqsContext()` see while a handler runs. */
+export interface SqsHandlerContext {
+  /** Consumer name from the module options. */
+  readonly name: string;
+  readonly queueUrl: string;
+  /** Messages of this call: one, or the whole batch for a batch handler. */
+  readonly messages: readonly Message[];
+  readonly signal: AbortSignal;
+}
+
+/**
+ * Runs around every handler call, like Shoryuken server middleware (`call(...) { yield }`). Call
+ * `next()` to continue; throw to fail the message. The first middleware is the outermost.
+ */
+export type SqsMiddleware = (
+  context: SqsHandlerContext,
+  next: () => Promise<unknown>,
+) => Promise<unknown>;
+
+const handlerContext = new AsyncLocalStorage<SqsHandlerContext>();
+
+/**
+ * The context of the handler call this code runs in, or `undefined` outside one. Works across
+ * awaits, so a logger can read the message id without it being passed down (ssut/nestjs-sqs#75).
+ */
+export function getSqsContext(): SqsHandlerContext | undefined {
+  return handlerContext.getStore();
+}
+
+export type SqsConsumerConfig = Omit<SqsConsumerOptions, 'name' | 'stopOptions'> & {
+  name?: string;
+  middleware?: SqsMiddleware[];
+} & (
     | { handleMessage: MessageHandler; handleMessageBatch?: never }
     | { handleMessage?: never; handleMessageBatch: BatchMessageHandler }
   );
@@ -326,7 +358,9 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     this.safeEmit('message_received', message);
     const heartbeat = this.startHeartbeat([message]);
     try {
-      await this.runWithTimeout(message, (signal) => this.config.handleMessage!(message, signal));
+      await this.runWithTimeout(message, (signal) =>
+        this.runHandler([message], signal, () => this.config.handleMessage!(message, signal)),
+      );
     } catch (error) {
       const err = toError(error);
       if (err instanceof HandlerTimeoutError) this.safeEmit('timeout_error', err, message);
@@ -349,7 +383,10 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     const heartbeat = this.startHeartbeat(messages);
     let result: unknown;
     try {
-      result = await this.config.handleMessageBatch!(messages, this.handlerController.signal);
+      const signal = this.handlerController.signal;
+      result = await this.runHandler(messages, signal, () =>
+        this.config.handleMessageBatch!(messages, signal),
+      );
     } catch (error) {
       this.safeEmit('processing_error', toError(error), messages);
       if (this.config.alwaysAcknowledge) await this.acknowledge(messages);
@@ -364,6 +401,26 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     } else {
       await this.acknowledge(messages);
     }
+  }
+
+  // Runs the middleware chain and the handler inside the handler's async context.
+  private runHandler(
+    messages: Message[],
+    signal: AbortSignal,
+    handler: () => Promise<unknown>,
+  ): Promise<unknown> {
+    const context: SqsHandlerContext = {
+      name: this.config.name ?? this.queueUrl,
+      queueUrl: this.queueUrl,
+      messages,
+      signal,
+    };
+    const middleware = this.config.middleware ?? [];
+    const dispatch = (index: number): Promise<unknown> => {
+      const current = middleware[index];
+      return current ? current(context, () => dispatch(index + 1)) : handler();
+    };
+    return handlerContext.run(context, () => dispatch(0));
   }
 
   private async runWithTimeout(
