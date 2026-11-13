@@ -1,0 +1,26 @@
+{
+  "name": "nest-sqs",
+  "version": "0.0.0",
+  "description": "Amazon SQS consumers and producers for NestJS 11 and 12",
+  "keywords": [
+    "nestjs",
+    "sqs",
+    "aws",
+    "queue",
+    "consumer",
+    "producer"
+  ],
+  "homepage": "https://github.com/jaehafe/nest-sqs#readme",
+  "bugs": "https://github.com/jaehafe/nest-sqs/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jaehafe/nest-sqs.git"
+  },
+  "license": "MIT",
+  "author": "jaehafe",
+  "type": "module",
+  "engines": {
+    "node": "^22.12.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@12.18.0"
+}
