@@ -1,7 +1,9 @@
 import { EventEmitter } from 'node:events';
 import {
   ChangeMessageVisibilityBatchCommand,
+  ChangeMessageVisibilityCommand,
   DeleteMessageBatchCommand,
+  DeleteMessageCommand,
   ReceiveMessageCommand,
   SQSClient,
 } from '@aws-sdk/client-sqs';
@@ -97,6 +99,8 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
   private receiveController = new AbortController();
   private handlerController = new AbortController();
   private readonly inFlight = new Set<Promise<void>>();
+  // Receipt handles a handler deleted itself, so the automatic delete skips them.
+  private readonly deletedByHandler = new Set<string>();
   private slotWaiters: Array<() => void> = [];
   private nextBackoffMs = 0;
 
@@ -174,6 +178,28 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     if (result === 'timeout') {
       this.handlerController.abort();
     }
+  }
+
+  /**
+   * Deletes a message now, for a handler that wants to acknowledge before it finishes
+   * (ssut/nestjs-sqs#63, #45). The automatic delete after the handler then skips it.
+   */
+  async deleteMessage(message: Message): Promise<void> {
+    await this.sqs.send(
+      new DeleteMessageCommand({ QueueUrl: this.queueUrl, ReceiptHandle: message.ReceiptHandle }),
+    );
+    if (message.ReceiptHandle) this.deletedByHandler.add(message.ReceiptHandle);
+  }
+
+  /** Sets a message's visibility timeout in seconds, for example to retry it sooner or later. */
+  async changeMessageVisibility(message: Message, visibilityTimeout: number): Promise<void> {
+    await this.sqs.send(
+      new ChangeMessageVisibilityCommand({
+        QueueUrl: this.queueUrl,
+        ReceiptHandle: message.ReceiptHandle,
+        VisibilityTimeout: visibilityTimeout,
+      }),
+    );
   }
 
   private async loop(): Promise<void> {
@@ -396,12 +422,20 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
   }
 
   private async acknowledge(messages: Message[]): Promise<void> {
-    if (messages.length === 0) return;
+    const pending: Message[] = [];
+    for (const message of messages) {
+      if (message.ReceiptHandle && this.deletedByHandler.delete(message.ReceiptHandle)) {
+        this.safeEmit('message_processed', message);
+      } else {
+        pending.push(message);
+      }
+    }
+    if (pending.length === 0) return;
     if (this.config.shouldDeleteMessages === false) {
-      for (const message of messages) this.safeEmit('message_processed', message);
+      for (const message of pending) this.safeEmit('message_processed', message);
       return;
     }
-    for (const chunk of chunks(messages, SQS_MAX_BATCH)) await this.deleteWithRetry(chunk);
+    for (const chunk of chunks(pending, SQS_MAX_BATCH)) await this.deleteWithRetry(chunk);
   }
 
   // Retries entries that failed for a transient reason, up to DELETE_MAX_ATTEMPTS, with novu's

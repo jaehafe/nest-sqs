@@ -414,3 +414,40 @@ describe('delete retries', () => {
     expect(sqs.callsOf('DeleteMessageBatchCommand')).toHaveLength(1);
   });
 });
+
+describe('manual acknowledgement', () => {
+  test('deleteMessage deletes at once and the automatic delete skips the message', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('early ack');
+    const processed: string[] = [];
+    let consumer!: SqsConsumer;
+    consumer = createConsumer(sqs, {
+      handleMessage: async (message) => {
+        await consumer.deleteMessage(message);
+        expect(sqs.deleted).toEqual(['early ack']);
+      },
+    });
+    consumer.on('message_processed', (message) => processed.push(message.Body!));
+    consumer.start();
+
+    await waitFor(() => processed.length === 1);
+    expect(sqs.callsOf('DeleteMessageCommand')).toHaveLength(1);
+    expect(sqs.callsOf('DeleteMessageBatchCommand')).toHaveLength(0);
+  });
+
+  test('changeMessageVisibility sets the timeout of one message', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('retry later');
+    let consumer!: SqsConsumer;
+    consumer = createConsumer(sqs, {
+      handleMessage: async (message) => {
+        await consumer.changeMessageVisibility(message, 120);
+        throw new Error('not yet');
+      },
+    });
+    consumer.start();
+
+    await waitFor(() => sqs.callsOf('ChangeMessageVisibilityCommand').length === 1);
+    expect(sqs.callsOf('ChangeMessageVisibilityCommand')[0]!.input.VisibilityTimeout).toBe(120);
+  });
+});

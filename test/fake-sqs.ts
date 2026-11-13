@@ -61,6 +61,12 @@ export class FakeSqs {
         return this.receive(command.input, options?.abortSignal);
       case 'DeleteMessageBatchCommand':
         return this.deleteBatch(command.input);
+      case 'DeleteMessageCommand':
+        return this.deleteBatch({
+          Entries: [{ Id: '0', ReceiptHandle: command.input.ReceiptHandle }],
+        });
+      case 'ChangeMessageVisibilityCommand':
+        return this.changeVisibility({ Entries: [command.input] });
       case 'ChangeMessageVisibilityBatchCommand':
         return this.changeVisibility(command.input);
       default:
