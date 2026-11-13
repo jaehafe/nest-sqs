@@ -42,7 +42,8 @@
     "format:check": "oxfmt --check",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:compat": "vitest run --config vitest.compat.config.ts"
   },
   "devDependencies": {
     "@arethetypeswrong/core": "^0.18.5",

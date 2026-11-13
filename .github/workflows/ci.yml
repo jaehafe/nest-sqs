@@ -79,18 +79,26 @@ jobs:
         run: pnpm run test
 
   integration:
+    strategy:
+      matrix:
+        nest-version:
+          - 11
+          - 12
+      fail-fast: false
     runs-on: ubuntu-latest
-    services:
-      elasticmq:
-        image: softwaremill/elasticmq-native:1.7.1
-        ports:
-          - 9324:9324
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
           fetch-depth: '1'
+
+      # Started after checkout so it can load the queues test/compat expects.
+      - name: Start ElasticMQ
+        run: >-
+          docker run -d --name elasticmq -p 9324:9324
+          -v ${{ github.workspace }}/test/compat/elasticmq.conf:/opt/elasticmq.conf
+          softwaremill/elasticmq-native:1.7.1
 
       - name: Install pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
@@ -104,7 +112,21 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Use NestJS ${{ matrix.nest-version }}
+        if: matrix.nest-version != 12
+        run: pnpm add -D @nestjs/common@^${{ matrix.nest-version }} @nestjs/core@^${{ matrix.nest-version }} @nestjs/testing@^${{ matrix.nest-version }}
+
+      - name: Wait for ElasticMQ
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf 'http://localhost:9324/?Action=ListQueues' | grep -q test.fifo && exit 0
+            sleep 1
+          done
+          docker logs elasticmq
+          exit 1
+
       - name: Integration test
         run: pnpm run test:integration
-        env:
-          ELASTICMQ_URL: http://localhost:9324
+
+      - name: '@ssut/nestjs-sqs e2e suite'
+        run: pnpm run test:compat
