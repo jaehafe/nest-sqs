@@ -305,13 +305,14 @@ describe('FIFO queues', () => {
 });
 
 describe('handler timeout', () => {
-  test('gives up on a handler that never settles and aborts its signal', async () => {
+  test('aborts the signal but keeps the slot until the handler settles', async () => {
     const sqs = new FakeSqs();
     sqs.add('hangs');
     let signal: AbortSignal | undefined;
     const timeouts: Error[] = [];
     const consumer = createConsumer(sqs, {
       handleMessageTimeout: 20,
+      terminateVisibilityTimeout: true,
       handleMessage: (_message, handlerSignal) => {
         signal = handlerSignal;
         return new Promise(() => {});
@@ -321,9 +322,73 @@ describe('handler timeout', () => {
     consumer.start();
 
     await waitFor(() => timeouts.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 30));
     expect(signal?.aborted).toBe(true);
-    expect(consumer.inFlightCount).toBe(0);
+    // Still running, so it still holds its slot and its message stays invisible: no second copy.
+    expect(consumer.inFlightCount).toBe(1);
+    expect(sqs.callsOf('ChangeMessageVisibilityBatchCommand')).toHaveLength(0);
     expect(sqs.deleted).toEqual([]);
+  });
+
+  test('never runs more handlers than `concurrency` after a timeout', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('slow');
+    sqs.add('next');
+    let running = 0;
+    let peak = 0;
+    const consumer = createConsumer(sqs, {
+      concurrency: 1,
+      handleMessageTimeout: 20,
+      handleMessage: async (message) => {
+        running++;
+        peak = Math.max(peak, running);
+        // Ignores the signal, as a handler stuck in a call without cancellation would.
+        await new Promise((resolve) => setTimeout(resolve, message.Body === 'slow' ? 100 : 1));
+        running--;
+      },
+    });
+    consumer.on('timeout_error', () => {});
+    consumer.start();
+
+    await waitFor(() => sqs.deleted.length === 2);
+    expect(peak).toBe(1);
+  });
+
+  test('deletes the message when a timed-out handler succeeds after all', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('late');
+    const timeouts: Error[] = [];
+    const consumer = createConsumer(sqs, {
+      handleMessageTimeout: 20,
+      handleMessage: () => new Promise((resolve) => setTimeout(resolve, 60)),
+    });
+    consumer.on('timeout_error', (error) => timeouts.push(error));
+    consumer.start();
+
+    await waitFor(() => sqs.deleted.length === 1);
+    expect(timeouts).toHaveLength(1);
+  });
+
+  test('applies to batch handlers too', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('a');
+    sqs.add('b');
+    let signal: AbortSignal | undefined;
+    const timeouts: Array<Message | Message[]> = [];
+    const consumer = createConsumer(sqs, {
+      batchSize: 2,
+      handleMessageTimeout: 20,
+      handleMessageBatch: (_messages, handlerSignal) => {
+        signal = handlerSignal;
+        return new Promise(() => {});
+      },
+    });
+    consumer.on('timeout_error', (_error, messages) => timeouts.push(messages));
+    consumer.start();
+
+    await waitFor(() => timeouts.length === 1);
+    expect(signal?.aborted).toBe(true);
+    expect((timeouts[0] as Message[]).map((message) => message.Body)).toEqual(['a', 'b']);
   });
 });
 

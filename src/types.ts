@@ -59,7 +59,11 @@ export interface SqsConsumerOptions {
   authenticationErrorTimeout?: number;
   /** Seconds. Extends visibility while a handler runs. Requires `visibilityTimeout`. */
   heartbeatInterval?: number;
-  /** Milliseconds before a handler is given up on and its message left for redelivery. */
+  /**
+   * Milliseconds after which a handler's signal is aborted and `timeout_error` is emitted. The
+   * handler keeps its slot, and its message stays invisible, until it settles, so stuck handlers
+   * cannot push the consumer past `concurrency` or run a message twice.
+   */
   handleMessageTimeout?: number;
   /** Visibility to set when a handler fails, so the retry comes sooner than the queue timeout. */
   terminateVisibilityTimeout?: boolean | number | ((messages: SqsMessage[]) => number);

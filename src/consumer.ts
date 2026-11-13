@@ -30,7 +30,8 @@ export interface SqsConsumerEvents {
   /** SQS call failed. `message` is set for delete and visibility errors, unset for receive errors. */
   error: [Error, (Message | Message[])?];
   processing_error: [Error, Message | Message[]];
-  timeout_error: [Error, Message];
+  /** A handler ran past `handleMessageTimeout`. Its slot is held until it settles. */
+  timeout_error: [Error, Message | Message[]];
   aborted: [];
 }
 
@@ -367,13 +368,11 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     this.safeEmit('message_received', message);
     const heartbeat = this.startHeartbeat([message]);
     try {
-      await this.runWithTimeout(message, (signal) =>
+      await this.runWithTimeout([message], (signal) =>
         this.runHandler([message], signal, () => this.config.handleMessage!(message, signal)),
       );
     } catch (error) {
-      const err = toError(error);
-      if (err instanceof HandlerTimeoutError) this.safeEmit('timeout_error', err, message);
-      else this.safeEmit('processing_error', err, message);
+      this.safeEmit('processing_error', toError(error), message);
       const notDeleted = this.forgetDeletedByHandler([message]);
       if (this.config.alwaysAcknowledge) {
         await this.acknowledge(notDeleted);
@@ -393,9 +392,8 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     const heartbeat = this.startHeartbeat(messages);
     let result: unknown;
     try {
-      const signal = this.handlerController.signal;
-      result = await this.runHandler(messages, signal, () =>
-        this.config.handleMessageBatch!(messages, signal),
+      result = await this.runWithTimeout(messages, (signal) =>
+        this.runHandler(messages, signal, () => this.config.handleMessageBatch!(messages, signal)),
       );
     } catch (error) {
       this.safeEmit('processing_error', toError(error), messages);
@@ -434,33 +432,30 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     return handlerContext.run(context, () => dispatch(0));
   }
 
+  // Past `handleMessageTimeout` the handler's signal is aborted and `timeout_error` is emitted, but
+  // the call is still awaited: its slot stays taken and its heartbeat keeps the message invisible
+  // until it settles. Releasing the slot earlier ran more handlers than `concurrency`, and changing
+  // the visibility of a message whose handler was still running delivered it a second time. The
+  // outcome then counts as usual: a late success deletes the message.
   private async runWithTimeout(
-    message: Message,
+    messages: Message[],
     run: (signal: AbortSignal) => Promise<unknown>,
-  ): Promise<void> {
+  ): Promise<unknown> {
     const timeoutMs = this.config.handleMessageTimeout;
-    if (!timeoutMs) {
-      await run(this.handlerController.signal);
-      return;
-    }
+    if (!timeoutMs) return run(this.handlerController.signal);
     const controller = new AbortController();
     const onStop = () => controller.abort();
     this.handlerController.signal.addEventListener('abort', onStop, { once: true });
-    let timer: NodeJS.Timeout | undefined;
+    const timer = setTimeout(() => {
+      controller.abort();
+      const ids = messages.map((message) => message.MessageId).join(', ');
+      const error = new HandlerTimeoutError(
+        `Handler for ${messages.length === 1 ? 'message' : 'messages'} ${ids} passed ${timeoutMs}ms; its signal was aborted and it is still holding its slot`,
+      );
+      this.safeEmit('timeout_error', error, messages.length === 1 ? messages[0]! : messages);
+    }, timeoutMs);
     try {
-      await Promise.race([
-        run(controller.signal),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            controller.abort();
-            reject(
-              new HandlerTimeoutError(
-                `Handler for message ${message.MessageId} timed out after ${timeoutMs}ms`,
-              ),
-            );
-          }, timeoutMs);
-        }),
-      ]);
+      return await run(controller.signal);
     } finally {
       clearTimeout(timer);
       this.handlerController.signal.removeEventListener('abort', onStop);
