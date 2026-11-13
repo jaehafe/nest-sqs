@@ -23,3 +23,6 @@ export type {
 } from './consumer.ts';
 export { FailedMessagesError, SqsProducer } from './producer.ts';
 export type { ProducerMessage } from './producer.ts';
+export { SqsModule } from './sqs.module.ts';
+export { SqsService } from './sqs.service.ts';
+export type { SqsConsumerMapValues } from './sqs.service.ts';
