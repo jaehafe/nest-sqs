@@ -22,6 +22,8 @@ export class FakeSqs {
   receiveDelayMs = 5;
   /** Throw this from the next N receives. */
   receiveErrors: Error[] = [];
+  /** Fail the next DeleteMessageBatch calls: an Error is thrown, an object marks every entry failed. */
+  deleteFailures: Array<Error | { Code: string; SenderFault: boolean }> = [];
   private readonly stored: StoredMessage[] = [];
   private receiptSeq = 0;
 
@@ -102,6 +104,14 @@ export class FakeSqs {
   }
 
   private deleteBatch(input: any) {
+    const failure = this.deleteFailures.shift();
+    if (failure instanceof Error) throw failure;
+    if (failure) {
+      return {
+        Successful: [],
+        Failed: input.Entries.map((entry: any) => ({ Id: entry.Id, ...failure })),
+      };
+    }
     const failed = [];
     for (const entry of input.Entries) {
       const index = this.stored.findIndex((stored) => stored.receipt === entry.ReceiptHandle);

@@ -371,3 +371,46 @@ describe('heartbeat', () => {
     expect(timeouts).toEqual([30, 15]);
   });
 });
+
+describe('delete retries', () => {
+  test('retries a transient delete failure', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('m');
+    sqs.deleteFailures.push(new Error('getaddrinfo EAI_AGAIN'));
+    const errors: Error[] = [];
+    const consumer = createConsumer(sqs, { handleMessage: async () => {} });
+    consumer.on('error', (error) => errors.push(error));
+    consumer.start();
+
+    await waitFor(() => sqs.deleted.length === 1);
+    expect(sqs.callsOf('DeleteMessageBatchCommand')).toHaveLength(2);
+    expect(errors).toEqual([]);
+  });
+
+  test('gives up after three attempts and reports the error', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('m');
+    for (let i = 0; i < 3; i++) sqs.deleteFailures.push(new Error('getaddrinfo EAI_AGAIN'));
+    const errors: Error[] = [];
+    const consumer = createConsumer(sqs, { handleMessage: async () => {} });
+    consumer.on('error', (error) => errors.push(error));
+    consumer.start();
+
+    await waitFor(() => errors.length === 1, 3_000);
+    expect(sqs.callsOf('DeleteMessageBatchCommand')).toHaveLength(3);
+  });
+
+  test('does not retry an expired receipt handle', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('m');
+    sqs.deleteFailures.push({ Code: 'ReceiptHandleIsInvalid', SenderFault: true });
+    const errors: Error[] = [];
+    const consumer = createConsumer(sqs, { handleMessage: async () => {} });
+    consumer.on('error', (error) => errors.push(error));
+    consumer.start();
+
+    await waitFor(() => errors.length === 1);
+    expect(errors[0]!.name).toBe('ReceiptHandleIsInvalid');
+    expect(sqs.callsOf('DeleteMessageBatchCommand')).toHaveLength(1);
+  });
+});

@@ -62,6 +62,18 @@ const SQS_MAX_BATCH = 10;
 // SQS caps a message's total visibility at 12 hours from receipt (Spring Cloud AWS
 // Visibility.MAX_VISIBILITY_TIMEOUT_SECONDS).
 const MAX_VISIBILITY_SECONDS = 43_200;
+// Delete retries, from novu's SqsConsumerService: the SDK does not retry DNS errors such as
+// EAI_AGAIN, and a failed delete after a successful handler means a duplicate run.
+const DELETE_MAX_ATTEMPTS = 3;
+const DELETE_BACKOFF_BASE_MS = 200;
+const DELETE_BACKOFF_JITTER_FACTOR = 0.25;
+const NON_RETRYABLE_DELETE_ERRORS = new Set([
+  'ReceiptHandleIsInvalid',
+  'InvalidParameterValue',
+  'InvalidAddress',
+  'AccessDenied',
+  'AccessDeniedException',
+]);
 
 /**
  * Polls one queue and runs a handler per message (or per batch) with at most `concurrency`
@@ -389,31 +401,58 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
       for (const message of messages) this.safeEmit('message_processed', message);
       return;
     }
-    for (const chunk of chunks(messages, SQS_MAX_BATCH)) {
+    for (const chunk of chunks(messages, SQS_MAX_BATCH)) await this.deleteWithRetry(chunk);
+  }
+
+  // Retries entries that failed for a transient reason, up to DELETE_MAX_ATTEMPTS, with novu's
+  // exponential backoff and jitter. Entries that cannot succeed (an expired receipt handle, missing
+  // permission) are reported at once; their messages will be redelivered.
+  private async deleteWithRetry(messages: Message[]): Promise<void> {
+    let pending = messages;
+    for (let attempt = 1; pending.length > 0; attempt++) {
+      let failed: Array<{ message: Message; error: Error; retryable: boolean }>;
       try {
         const output = await this.sqs.send(
           new DeleteMessageBatchCommand({
             QueueUrl: this.queueUrl,
-            Entries: chunk.map((message, index) => ({
+            Entries: pending.map((message, index) => ({
               Id: String(index),
               ReceiptHandle: message.ReceiptHandle,
             })),
           }),
         );
-        const failed = new Set((output.Failed ?? []).map((entry) => entry.Id));
-        chunk.forEach((message, index) => {
-          if (failed.has(String(index))) {
-            this.safeEmit(
-              'error',
-              new Error(`Failed to delete message ${message.MessageId}`),
-              message,
-            );
-          } else {
+        const failedEntries = new Map((output.Failed ?? []).map((entry) => [entry.Id, entry]));
+        failed = [];
+        pending.forEach((message, index) => {
+          const entry = failedEntries.get(String(index));
+          if (!entry) {
             this.safeEmit('message_processed', message);
+            return;
           }
+          const error = new Error(
+            `Failed to delete message ${message.MessageId}: ${entry.Code ?? 'unknown'} ${entry.Message ?? ''}`.trim(),
+          );
+          error.name = entry.Code ?? 'DeleteFailed';
+          failed.push({
+            message,
+            error,
+            retryable: !entry.SenderFault && !NON_RETRYABLE_DELETE_ERRORS.has(entry.Code ?? ''),
+          });
         });
-      } catch (error) {
-        this.safeEmit('error', toError(error), chunk);
+      } catch (thrown) {
+        const error = toError(thrown);
+        const retryable = !NON_RETRYABLE_DELETE_ERRORS.has(error.name);
+        failed = pending.map((message) => ({ message, error, retryable }));
+      }
+
+      const retry = failed.filter((entry) => entry.retryable && attempt < DELETE_MAX_ATTEMPTS);
+      for (const entry of failed) {
+        if (!retry.includes(entry)) this.safeEmit('error', entry.error, entry.message);
+      }
+      pending = retry.map((entry) => entry.message);
+      if (pending.length > 0) {
+        const base = DELETE_BACKOFF_BASE_MS * 2 ** (attempt - 1);
+        await wait(base + Math.floor(Math.random() * base * DELETE_BACKOFF_JITTER_FACTOR));
       }
     }
   }
@@ -515,6 +554,10 @@ function isConnectionError(error: unknown): boolean {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function chunks<T>(items: T[], size: number): T[][] {
