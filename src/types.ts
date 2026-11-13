@@ -12,7 +12,8 @@ export type QueueName = string;
 
 export interface StopOptions {
   /**
-   * Abort the in-flight `ReceiveMessage` long poll right after in-flight handlers finish.
+   * Do not wait for in-flight handlers: abort their signals and the outstanding long poll at once.
+   * Their messages are redelivered after the visibility timeout.
    * @default false
    */
   abort?: boolean;
