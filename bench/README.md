@@ -7,6 +7,7 @@ Each library runs in its own process; every run gets a fresh, pre-filled queue.
 docker run -d -p 9324:9324 softwaremill/elasticmq-native:1.7.1
 cd bench
 node setup.mjs   # builds and packs nest-sqs, installs it next to @ssut/nestjs-sqs
+node faults.mjs  # failure scenarios
 RUNS=5 node run.mjs  # runs per case (default 3); SCENARIO=fast or LIBRARY=nest-sqs narrows it
 ```
 
@@ -40,6 +41,28 @@ Apple M5 Pro, Node 24.22.1, ElasticMQ 1.7.1 in Docker, median of 5 runs after on
 - **Costs:** at concurrency 10 nest-sqs uses a little more CPU (0.76 s vs 0.67 s on fast) and
   about 20 MB more peak RSS. It makes more, smaller `ReceiveMessage` calls when slots free one at a
   time.
+
+## Failure scenarios
+
+`node faults.mjs` puts both libraries through the same failures, each in its own process. Outage and
+delete failures also run with unhandled rejections only logged (SURVIVE) and with an `error` event
+handler registered (ERROR_HANDLER), the documented way to keep `@ssut/nestjs-sqs` polling.
+
+| scenario                                             | @ssut/nestjs-sqs                              | nest-sqs                         |
+| ---------------------------------------------------- | --------------------------------------------- | -------------------------------- |
+| `app.close()` while 10 handlers run                  | all 10 still running after close returns      | 0                                |
+| SQS unreachable for 3 s                              | process exits on the unhandled `error` event  | recovers, 1-2 receive calls      |
+| same, rejections only logged                         | stops polling for good                        | recovers                         |
+| same, `error` handler registered                     | recovers after 1,377-1,505 receive calls      | recovers, 1 receive call         |
+| first delete fails (EAI_AGAIN)                       | process exits                                 | handler runs once                |
+| same, rejections only logged                         | stops polling for good                        | handler runs once, keeps polling |
+| same, `error` handler registered                     | handler runs twice                            | handler runs once                |
+| one FIFO group of 5, earlier ones slower             | finishes 5 4 3 2 1                            | 1 2 3 4 5                        |
+| handler method wrapped after boot                    | original runs                                 | wrapped runs                     |
+| error event handler in another provider using `this` | process exits (`this` is the message handler) | works                            |
+
+Not compared: deleting on `undefined` returns. `@ssut/nestjs-sqs` 3.0.1 uses `sqs-consumer` 11.6.0,
+which still deletes then; the difference appears only after upgrading `sqs-consumer` to 14 or later.
 
 ## What these numbers are not
 
