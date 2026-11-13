@@ -175,6 +175,12 @@ importers:
       '@nestjs/common':
         specifier: ^12.3.2
         version: 12.4.2(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/core':
+        specifier: ^12.4.2
+        version: 12.4.2(@nestjs/common@12.4.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/testing':
+        specifier: ^12.4.2
+        version: 12.4.2(@nestjs/common@12.4.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.4.2(@nestjs/common@12.4.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))
       '@types/node':
         specifier: ^22.20.5
         version: 22.20.5
@@ -330,6 +336,37 @@ packages:
       class-transformer:
         optional: true
       class-validator:
+        optional: true
+
+  '@nestjs/core@12.4.2':
+    resolution: {integrity: sha512-x0Xt+4Koah/CY97P89GxudJomylIMhlU5hmiyJOvBuayU9zIzQiYoOFzTs6/WdKM9ppAnWjfTnOYqQVIQ3t1mA==}
+    engines: {node: '>= 20'}
+    peerDependencies:
+      '@nestjs/common': ^12.0.0
+      '@nestjs/microservices': ^12.0.0
+      '@nestjs/platform-express': ^12.0.0
+      '@nestjs/websockets': ^12.0.0
+      reflect-metadata: ^0.1.12 || ^0.2.0
+      rxjs: ^7.1.0
+    peerDependenciesMeta:
+      '@nestjs/microservices':
+        optional: true
+      '@nestjs/platform-express':
+        optional: true
+      '@nestjs/websockets':
+        optional: true
+
+  '@nestjs/testing@12.4.2':
+    resolution: {integrity: sha512-zpHIHlKDKQHgL5ydKxCpdv6I0IWQ9AkMWFdL3PrvxytOYfLj1Acqc6L0g9GD/tHhrGUj6L82hSbQoEERzjMf6A==}
+    peerDependencies:
+      '@nestjs/common': ^12.0.0
+      '@nestjs/core': ^12.0.0
+      '@nestjs/microservices': ^12.0.0
+      '@nestjs/platform-express': ^12.0.0
+    peerDependenciesMeta:
+      '@nestjs/microservices':
+        optional: true
+      '@nestjs/platform-express':
         optional: true
 
   '@oxc-project/types@0.156.0':
@@ -1064,6 +1101,9 @@ packages:
     resolution: {integrity: sha512-KfYbmpRm0VbLjEvVa9yGwCi9GI34xvi7A/HXYWQO65CSD2u3MczUJSuwXKFIxlGsgBQizV9q5J9NHj4VG0n+pA==}
     engines: {node: '>=12.0.0'}
 
+  fast-safe-stringify@2.1.1:
+    resolution: {integrity: sha512-W+KJc2dmILlPplD/H4K9l9LcAHAfPtP6BY84uVLXQ6Evcz9Lcg33Y2z1IVblT6xdY54PXYVHEv+0Wpq8Io6zkA==}
+
   fdir@6.5.0:
     resolution: {integrity: sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==}
     engines: {node: '>=12.0.0'}
@@ -1235,6 +1275,9 @@ packages:
 
   package-manager-detector@1.9.0:
     resolution: {integrity: sha512-zAMfbta9nPA8AKkA4WdmNAT8R8s6Dk0/xwPsqNnRidMFcLo1YkLuPDTgs2f64XdzS8vbLNnoJ+uUIkgbz7oRHA==}
+
+  path-to-regexp@8.4.2:
+    resolution: {integrity: sha512-qRcuIdP69NPm4qbACK+aDogI5CBDMi1jKe0ry5rSQJz8JVLsC7jV8XpiJjGRLLol3N+R5ihGYcrPLTno6pAdBA==}
 
   picocolors@1.1.1:
     resolution: {integrity: sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==}
@@ -1729,6 +1772,23 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  '@nestjs/core@12.4.2(@nestjs/common@12.4.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)':
+    dependencies:
+      '@nestjs/common': 12.4.2(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      fast-safe-stringify: 2.1.1
+      iterare: 1.2.1
+      path-to-regexp: 8.4.2
+      reflect-metadata: 0.2.2
+      rxjs: 7.8.2
+      tslib: 2.9.1
+      uid: 2.0.2
+
+  '@nestjs/testing@12.4.2(@nestjs/common@12.4.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.4.2(@nestjs/common@12.4.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2))':
+    dependencies:
+      '@nestjs/common': 12.4.2(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/core': 12.4.2(@nestjs/common@12.4.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      tslib: 2.9.1
+
   '@oxc-project/types@0.156.0': {}
 
   '@oxc-project/types@0.158.0': {}
@@ -2143,6 +2203,8 @@ snapshots:
 
   expect-type@1.4.0: {}
 
+  fast-safe-stringify@2.1.1: {}
+
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
       picomatch: 4.0.7
@@ -2285,6 +2347,8 @@ snapshots:
       '@oxlint/binding-win32-x64-msvc': 1.93.0
 
   package-manager-detector@1.9.0: {}
+
+  path-to-regexp@8.4.2: {}
 
   picocolors@1.1.1: {}
 
