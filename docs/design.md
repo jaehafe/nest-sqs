@@ -1,7 +1,7 @@
 # Design
 
 nest-sqs is a NestJS 11/12 replacement for `@ssut/nestjs-sqs`. This document records what it keeps,
-what it changes, and why. Behavior described here is the target for v0.1 unless marked otherwise.
+what it changes, and why. Everything here is implemented in 0.1 unless marked planned.
 
 ## Goals
 
@@ -32,7 +32,7 @@ what it changes, and why. Behavior described here is the target for v0.1 unless 
 | `SQS_OPTIONS`, `SQS_CONSUMER_METHOD`, `SQS_CONSUMER_EVENT_HANDLER`            | Same `Symbol.for` keys                                                     |
 | `SqsModule.register` / `registerAsync`                                        | Same options, plus `extraProviders` on `registerAsync`                     |
 | Consumer and producer options                                                 | Same field names as `sqs-consumer` / `sqs-producer`                        |
-| `SqsService.send`, `purgeQueue`, `getQueueAttributes`, `getProducerQueueSize` | Same signatures (planned)                                                  |
+| `SqsService.send`, `purgeQueue`, `getQueueAttributes`, `getProducerQueueSize` | Same signatures                                                            |
 | `SqsService.consumers` / `producers` maps                                     | Values change: the old ones held `sqs-consumer` / `sqs-producer` instances |
 | Acknowledgement by return value                                               | **Changed**, see below                                                     |
 
@@ -112,7 +112,9 @@ at hundreds of requests per second.
 
 ### Shutdown
 
-On `onApplicationShutdown` (requires `app.enableShutdownHooks()`):
+In `onModuleDestroy` (on `SIGTERM` this needs `app.enableShutdownHooks()`). It is the first shutdown
+hook, so it runs before `beforeApplicationShutdown` and `onApplicationShutdown`, where database
+clients usually close:
 
 1. stop polling,
 2. wait up to `drainTimeoutMs` (default 15 s) for in-flight handlers,
@@ -154,11 +156,24 @@ like `sqs-producer`'s `FailedMessagesError`, throws with the ids of entries SQS 
 | #97       | FIFO warning                                 | Ordered per message group                                                                  |
 | #101      | AWS SDK version mismatch                     | `sqs-consumer` ships its own `@aws-sdk/client-sqs` as a dependency; here it is only a peer |
 
+## Verification
+
+| Layer         | What                                                                                                    | Where                                  |
+| ------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| Unit          | Polling loop, acknowledgement, concurrency, back-off, shutdown, FIFO, timeouts, producer, module wiring | `test/*.test.ts`, in-memory SQS client |
+| Integration   | Redelivery, no loss when stopping under load, long poll abort, heartbeat, FIFO order                    | `test/integration`, ElasticMQ          |
+| Compatibility | The e2e suite of `@ssut/nestjs-sqs`, unchanged except imports, on NestJS 11 and 12                      | `test/compat`, ElasticMQ               |
+
+Each behavior test was checked by putting back the defect it guards against and seeing it fail.
+
+Not yet verified: real AWS SQS (ElasticMQ can differ on error codes and limits), throughput against
+`@ssut/nestjs-sqs`, and production use.
+
 ## Roadmap
 
-| Version | Scope                                                                | Verified by                                |
-| ------- | -------------------------------------------------------------------- | ------------------------------------------ |
-| 0.1     | Module, discovery, polling loop, acknowledgement, shutdown, producer | Unit tests and ElasticMQ integration tests |
-| 0.2     | Visibility heartbeat, handler timeout, FIFO groups                   | Fault-injection tests                      |
-| 0.3     | OpenTelemetry spans and metrics, per-handler async context           | Example app                                |
-| 1.0     | Docs and a migration guide                                           | Running in production                      |
+| Version | Scope                                                                                                               |
+| ------- | ------------------------------------------------------------------------------------------------------------------- |
+| 0.1     | Module, discovery, polling loop, acknowledgement, FIFO groups, heartbeat, handler timeout, shutdown drain, producer |
+| 0.2     | `SqsService.deleteMessage` (#63, #45), per-handler async context (#75), OpenTelemetry spans and metrics             |
+| 0.3     | Smoke test on real AWS SQS, benchmark against `@ssut/nestjs-sqs`                                                    |
+| 1.0     | Migration guide, production use                                                                                     |
