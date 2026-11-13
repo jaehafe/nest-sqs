@@ -6,6 +6,7 @@ import type {
   SQSClient,
 } from '@aws-sdk/client-sqs';
 import type { LoggerService, ModuleMetadata, Provider, Type } from '@nestjs/common';
+import type { SqsMiddleware } from './consumer.ts';
 
 /** Ties an entry in `consumers`/`producers` to its handler and to `SqsService` calls. */
 export type QueueName = string;
@@ -70,6 +71,8 @@ export interface SqsConsumerOptions {
   /** Accepted for compatibility. Acknowledgement no longer depends on the return value. */
   strictReturn?: boolean;
   stopOptions?: StopOptions;
+  /** Runs around this consumer's handler, inside the module-wide `middleware`. */
+  middleware?: SqsMiddleware[];
 
   /**
    * Handlers running at once for this consumer, independent of `batchSize`.
@@ -101,6 +104,11 @@ export interface SqsOptions {
   producers?: SqsProducerOptions[];
   logger?: LoggerService;
   globalStopOptions?: StopOptions;
+  /**
+   * Runs around every handler, outermost first, before each consumer's own `middleware`. To use
+   * providers here (a CLS service, a tracer), build it in a `registerAsync` factory.
+   */
+  middleware?: SqsMiddleware[];
 }
 
 export interface SqsModuleOptionsFactory {

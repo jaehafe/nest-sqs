@@ -1,6 +1,7 @@
 import type { EventEmitter } from 'node:events';
 import { GetQueueAttributesCommand, PurgeQueueCommand } from '@aws-sdk/client-sqs';
 import type {
+  Message as SqsMessage,
   PurgeQueueCommandOutput,
   QueueAttributeName,
   SendMessageBatchResultEntry,
@@ -77,6 +78,8 @@ export class SqsService implements OnModuleInit, OnApplicationBootstrap, OnModul
       const call = (...args: unknown[]) => handler.instance[handler.methodName]!(...args);
       const config = {
         ...options,
+        name,
+        middleware: [...(this.options.middleware ?? []), ...(options.middleware ?? [])],
         ...(handler.meta.batch ? { handleMessageBatch: call } : { handleMessage: call }),
       } as SqsConsumerConfig;
       const consumer = new SqsConsumer(config);
@@ -173,10 +176,33 @@ export class SqsService implements OnModuleInit, OnApplicationBootstrap, OnModul
     return response.Attributes as { [key in QueueAttributeName]: string };
   }
 
+  /**
+   * Deletes a message now, from inside its handler. The automatic delete after the handler then
+   * skips it.
+   */
+  deleteMessage(name: QueueName, message: SqsMessage): Promise<void> {
+    return this.getConsumer(name).deleteMessage(message);
+  }
+
+  /** Sets a received message's visibility timeout in seconds. */
+  changeMessageVisibility(
+    name: QueueName,
+    message: SqsMessage,
+    visibilityTimeout: number,
+  ): Promise<void> {
+    return this.getConsumer(name).changeMessageVisibility(message, visibilityTimeout);
+  }
+
   getProducerQueueSize(name: QueueName): Promise<number> {
     const producer = this.producers.get(name);
     if (!producer) throw new Error(`Producer does not exist: ${name}`);
     return producer.queueSize();
+  }
+
+  private getConsumer(name: QueueName): SqsConsumer {
+    const consumer = this.consumers.get(name)?.instance;
+    if (!consumer) throw new Error(`Consumer does not exist: ${name}`);
+    return consumer;
   }
 
   private getQueueInfo(name: QueueName): { sqs: SqsProducer['sqs']; queueUrl: string } {

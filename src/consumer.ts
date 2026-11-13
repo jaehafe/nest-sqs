@@ -65,7 +65,6 @@ export function getSqsContext(): SqsHandlerContext | undefined {
 
 export type SqsConsumerConfig = Omit<SqsConsumerOptions, 'name' | 'stopOptions'> & {
   name?: string;
-  middleware?: SqsMiddleware[];
 } & (
     | { handleMessage: MessageHandler; handleMessageBatch?: never }
     | { handleMessage?: never; handleMessageBatch: BatchMessageHandler }

@@ -3,7 +3,13 @@ import { Inject, Injectable, Module } from '@nestjs/common';
 import type { INestApplicationContext } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { afterEach, describe, expect, test } from 'vitest';
-import { SqsConsumerEventHandler, SqsMessageHandler, SqsModule, SqsService } from '../src/index.ts';
+import {
+  SqsConsumerEventHandler,
+  SqsMessageHandler,
+  SqsModule,
+  SqsService,
+  getSqsContext,
+} from '../src/index.ts';
 import type { SqsConsumerOptions, SqsModuleOptionsFactory, SqsOptions } from '../src/index.ts';
 import { FakeSqs, deferred, waitFor } from './fake-sqs.ts';
 
@@ -229,5 +235,72 @@ describe('SqsModule', () => {
 
     await app.get(SqsService).send('orders', { id: '1', body: { orderId: 7 } });
     expect(sent).toEqual([{ Id: '1', MessageBody: '{"orderId":7}' }]);
+  });
+});
+
+describe('SqsModule middleware and manual acknowledgement', () => {
+  test('runs module-wide middleware outside consumer middleware, with the consumer name', async () => {
+    const order: string[] = [];
+
+    @Injectable()
+    class Handler {
+      @SqsMessageHandler('orders')
+      async handle() {
+        order.push(`handler ${getSqsContext()?.name}`);
+      }
+    }
+
+    const sqs = new FakeSqs();
+    sqs.add('order-1');
+    await boot(
+      [
+        SqsModule.register({
+          middleware: [
+            async (_context, next) => {
+              order.push('module');
+              await next();
+            },
+          ],
+          consumers: [
+            {
+              name: 'orders',
+              queueUrl: QUEUE,
+              sqs: sqs.asClient(),
+              middleware: [
+                async (_context, next) => {
+                  order.push('consumer');
+                  await next();
+                },
+              ],
+            },
+          ],
+        }),
+      ],
+      [Handler],
+    );
+
+    await waitFor(() => sqs.deleted.length === 1);
+    expect(order).toEqual(['module', 'consumer', 'handler orders']);
+  });
+
+  test('SqsService.deleteMessage acknowledges from inside the handler', async () => {
+    @Injectable()
+    class Handler {
+      constructor(@Inject(SqsService) private readonly sqsService: SqsService) {}
+
+      @SqsMessageHandler('orders')
+      async handle(message: Message) {
+        await this.sqsService.deleteMessage('orders', message);
+      }
+    }
+
+    const sqs = new FakeSqs();
+    sqs.add('order-1');
+    await boot([SqsModule.register(options(sqs))], [Handler]);
+
+    await waitFor(() => sqs.deleted.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sqs.callsOf('DeleteMessageCommand')).toHaveLength(1);
+    expect(sqs.callsOf('DeleteMessageBatchCommand')).toHaveLength(0);
   });
 });
