@@ -47,6 +47,11 @@ export class FakeSqs {
     return this.stored.map((entry) => entry.message.Body!);
   }
 
+  /** The receipt handle of the last receive of the message with this body. */
+  receiptOf(body: string): string | undefined {
+    return this.stored.find((entry) => entry.message.Body === body)?.receipt;
+  }
+
   callsOf(command: string): Call[] {
     return this.calls.filter((call) => call.command === command);
   }

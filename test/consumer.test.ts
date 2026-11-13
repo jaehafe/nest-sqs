@@ -688,3 +688,63 @@ describe('deleted by the handler, then failed', () => {
     );
   });
 });
+
+describe('heartbeat from receipt', () => {
+  // SQS holds back the rest of a FIFO group only while it is in flight. A waiting message whose
+  // visibility ran out would go to another consumer and run out of order.
+  test('extends a FIFO message while it waits behind an earlier one of its group', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('a1', { MessageGroupId: 'a' });
+    sqs.add('a2', { MessageGroupId: 'a' });
+    const a1 = deferred();
+    const consumer = createConsumer(sqs, {
+      queueUrl: `${QUEUE}.fifo`,
+      batchSize: 2,
+      visibilityTimeout: 2,
+      heartbeatInterval: 1,
+      handleMessage: async (message) => {
+        if (message.Body === 'a1') await a1.promise;
+      },
+    });
+    consumer.start();
+
+    await waitFor(() => consumer.inFlightCount === 2);
+    const a2Receipt = sqs.receiptOf('a2');
+    await waitFor(
+      () =>
+        sqs
+          .callsOf('ChangeMessageVisibilityBatchCommand')
+          .some((call) =>
+            call.input.Entries.some((entry: any) => entry.ReceiptHandle === a2Receipt),
+          ),
+      2_500,
+    );
+    a1.resolve();
+    await waitFor(() => sqs.deleted.length === 2);
+    expect(sqs.deleted).toEqual(['a1', 'a2']);
+  });
+
+  test('stops the heartbeat before handing a failed message back', async () => {
+    const sqs = new FakeSqs();
+    sqs.add('m');
+    const consumer = createConsumer(sqs, {
+      visibilityTimeout: 2,
+      heartbeatInterval: 1,
+      terminateVisibilityTimeout: true,
+      handleMessage: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_050));
+        throw new Error('fail');
+      },
+    });
+    consumer.on('processing_error', () => {});
+    consumer.start();
+
+    await waitFor(() => consumer.inFlightCount === 0, 3_000);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    const timeouts = sqs
+      .callsOf('ChangeMessageVisibilityBatchCommand')
+      .map((call) => call.input.Entries[0].VisibilityTimeout);
+    // One heartbeat at 1 s, then the hand-back; nothing after it.
+    expect(timeouts.at(-1)).toBe(0);
+  });
+});

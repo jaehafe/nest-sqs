@@ -316,14 +316,22 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     return delay;
   }
 
+  // Heartbeats start here, at receipt, for every message: a FIFO message waiting behind an earlier
+  // one of its group has to stay invisible too, or another consumer gets it and runs it out of
+  // order. The 12-hour visibility limit is also counted from receipt.
   private dispatch(messages: Message[]): void {
+    const receivedAt = Date.now();
     let tasks: Promise<void>[];
     if (this.config.handleMessageBatch) {
-      tasks = [this.track(() => this.processBatch(messages))];
+      const heartbeat = this.startHeartbeat(messages, receivedAt);
+      tasks = [this.track(() => this.processBatch(messages, heartbeat))];
     } else if (this.isFifo) {
-      tasks = this.dispatchFifo(messages);
+      tasks = this.dispatchFifo(messages, receivedAt);
     } else {
-      tasks = messages.map((message) => this.track(() => this.processMessage(message)));
+      tasks = messages.map((message) => {
+        const heartbeat = this.startHeartbeat([message], receivedAt);
+        return this.track(() => this.processMessage(message, heartbeat));
+      });
     }
     void Promise.allSettled(tasks).then(() => this.safeEmit('response_processed'));
   }
@@ -333,18 +341,20 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
   // made visible again at once: SQS holds back a group while any of its messages is in flight, so
   // leaving them invisible would also delay the retry of the failed one. SQS then redelivers the
   // group in its original order.
-  private dispatchFifo(messages: Message[]): Promise<void>[] {
+  private dispatchFifo(messages: Message[], receivedAt: number): Promise<void>[] {
     const lastOfGroup = new Map<string, Promise<boolean>>();
     return messages.map((message) => {
+      const heartbeat = this.startHeartbeat([message], receivedAt);
       const groupId = message.Attributes?.MessageGroupId ?? '';
       const previous = lastOfGroup.get(groupId);
       const result = previous
         ? previous.then(async (ok) => {
-            if (ok) return this.processMessage(message);
+            if (ok) return this.processMessage(message, heartbeat);
+            clearInterval(heartbeat);
             await this.changeVisibility([message], 0);
             return false;
           })
-        : this.processMessage(message);
+        : this.processMessage(message, heartbeat);
       lastOfGroup.set(groupId, result);
       return this.track(() => result);
     });
@@ -363,46 +373,62 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
     return task;
   }
 
-  /** Runs the handler for one message. Resolves `true` when it succeeded. */
-  private async processMessage(message: Message): Promise<boolean> {
+  /**
+   * Runs the handler for one message. Resolves `true` when it succeeded. The heartbeat stops as soon
+   * as the handler settles, before the delete or the hand-back, so a late tick cannot hide a message
+   * that was just made visible again.
+   */
+  private async processMessage(
+    message: Message,
+    heartbeat: NodeJS.Timeout | undefined,
+  ): Promise<boolean> {
     this.safeEmit('message_received', message);
-    const heartbeat = this.startHeartbeat([message]);
+    let failure: { error: unknown } | undefined;
     try {
       await this.runWithTimeout([message], (signal) =>
         this.runHandler([message], signal, () => this.config.handleMessage!(message, signal)),
       );
     } catch (error) {
-      this.safeEmit('processing_error', toError(error), message);
-      const notDeleted = this.forgetDeletedByHandler([message]);
-      if (this.config.alwaysAcknowledge) {
-        await this.acknowledge(notDeleted);
-      } else {
-        await this.terminateVisibility(notDeleted);
-      }
-      return false;
+      failure = { error };
     } finally {
       clearInterval(heartbeat);
     }
-    await this.acknowledge([message]);
-    return true;
+    if (!failure) {
+      await this.acknowledge([message]);
+      return true;
+    }
+    this.safeEmit('processing_error', toError(failure.error), message);
+    const notDeleted = this.forgetDeletedByHandler([message]);
+    if (this.config.alwaysAcknowledge) {
+      await this.acknowledge(notDeleted);
+    } else {
+      await this.terminateVisibility(notDeleted);
+    }
+    return false;
   }
 
-  private async processBatch(messages: Message[]): Promise<void> {
+  private async processBatch(
+    messages: Message[],
+    heartbeat: NodeJS.Timeout | undefined,
+  ): Promise<void> {
     for (const message of messages) this.safeEmit('message_received', message);
-    const heartbeat = this.startHeartbeat(messages);
     let result: unknown;
+    let failure: { error: unknown } | undefined;
     try {
       result = await this.runWithTimeout(messages, (signal) =>
         this.runHandler(messages, signal, () => this.config.handleMessageBatch!(messages, signal)),
       );
     } catch (error) {
-      this.safeEmit('processing_error', toError(error), messages);
+      failure = { error };
+    } finally {
+      clearInterval(heartbeat);
+    }
+    if (failure) {
+      this.safeEmit('processing_error', toError(failure.error), messages);
       const notDeleted = this.forgetDeletedByHandler(messages);
       if (this.config.alwaysAcknowledge) await this.acknowledge(notDeleted);
       else await this.terminateVisibility(notDeleted);
       return;
-    } finally {
-      clearInterval(heartbeat);
     }
     if (Array.isArray(result) && !this.config.alwaysAcknowledge) {
       const ids = new Set(result.map((message: Message) => message.MessageId));
@@ -464,10 +490,9 @@ export class SqsConsumer extends EventEmitter<SqsConsumerEvents> {
 
   // Each tick sets visibility to `visibilityTimeout` from now, but never past 12 hours from receipt:
   // SQS rejects that. The last tick sets what is left and stops.
-  private startHeartbeat(messages: Message[]): NodeJS.Timeout | undefined {
+  private startHeartbeat(messages: Message[], receivedAt: number): NodeJS.Timeout | undefined {
     const { heartbeatInterval, visibilityTimeout } = this.config;
     if (!heartbeatInterval || visibilityTimeout === undefined) return undefined;
-    const receivedAt = Date.now();
     const timer: NodeJS.Timeout = setInterval(() => {
       const elapsedSeconds = Math.floor((Date.now() - receivedAt) / 1000);
       const left = MAX_VISIBILITY_SECONDS - elapsedSeconds;
