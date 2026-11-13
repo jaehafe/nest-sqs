@@ -10,7 +10,7 @@
     "node": true,
     "es2024": true
   },
-  "ignorePatterns": ["dist"],
+  "ignorePatterns": ["dist", "test/compat"],
   "rules": {
     "typescript/no-extraneous-class": [
       "warn",
